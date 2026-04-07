@@ -1,7 +1,10 @@
 import http from 'node:http';
 import { URL } from 'node:url';
 import { buildAuthUrl, exchangeCode, fetchMe, assertConfig, requiredConfig } from './lib/x-oauth.mjs';
-import { savePending, takePending, saveAuthorizedAccount, getAuthorizedAccount } from './lib/store.mjs';
+import { savePending, takePending } from './lib/store.mjs';
+import { loadConfig, setAuthorizedAccount, setPostingEnabled, setPostingMode } from './lib/config-store.mjs';
+import { listRecent } from './lib/post-history-store.mjs';
+import { formatTradeExecutionPost, formatDailySummaryPost, formatWeeklySummaryPost } from './lib/post-formatters.mjs';
 
 const PORT = Number(process.env.PORT || 8080);
 
@@ -25,7 +28,8 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/auth/x/status') {
       const cfg = requiredConfig();
-      const auth = getAuthorizedAccount();
+      const stored = await loadConfig();
+      const auth = stored.auth?.authorized ? stored.auth : null;
       return sendJson(res, 200, {
         ok: true,
         config: {
@@ -42,8 +46,75 @@ const server = http.createServer(async (req, res) => {
           tokenStored: !!auth.accessToken,
           refreshTokenStored: !!auth.refreshToken,
         } : null,
-        postingEnabled: false,
+        postingEnabled: !!stored.postingEnabled,
+        postingMode: stored.postingMode,
       });
+    }
+
+    if (url.pathname === '/control/status') {
+      const stored = await loadConfig();
+      const recent = await listRecent(10);
+      return sendJson(res, 200, {
+        ok: true,
+        postingEnabled: !!stored.postingEnabled,
+        postingMode: stored.postingMode,
+        expectedUsername: stored.expectedUsername,
+        authorizedUsername: stored.auth?.username || null,
+        recentPosts: recent
+      });
+    }
+
+    if (url.pathname === '/control/enable-posting' && req.method === 'POST') {
+      const cfg = await setPostingEnabled(true);
+      return sendJson(res, 200, { ok: true, postingEnabled: cfg.postingEnabled, postingMode: cfg.postingMode });
+    }
+
+    if (url.pathname === '/control/disable-posting' && req.method === 'POST') {
+      const cfg = await setPostingEnabled(false);
+      return sendJson(res, 200, { ok: true, postingEnabled: cfg.postingEnabled, postingMode: cfg.postingMode });
+    }
+
+    if (url.pathname === '/control/set-mode' && req.method === 'POST') {
+      const mode = String(url.searchParams.get('mode') || '').trim();
+      const cfg = await setPostingMode(mode);
+      return sendJson(res, 200, { ok: true, postingEnabled: cfg.postingEnabled, postingMode: cfg.postingMode });
+    }
+
+    if (url.pathname === '/posts/dry-run' && req.method === 'GET') {
+      const type = String(url.searchParams.get('type') || 'trade').trim();
+      if (type === 'trade') {
+        return sendJson(res, 200, formatTradeExecutionPost({
+          coin: String(url.searchParams.get('coin') || 'DOT'),
+          entryPrice: Number(url.searchParams.get('entry') || 4.18),
+          exitPrice: Number(url.searchParams.get('exit') || 4.27),
+          returnPct: Number(url.searchParams.get('returnPct') || 2.15),
+          sourceAsset: String(url.searchParams.get('source') || 'USD'),
+          destinationAsset: String(url.searchParams.get('destination') || 'DOT')
+        }));
+      }
+      if (type === 'daily') {
+        return sendJson(res, 200, formatDailySummaryPost({
+          dateLabel: String(url.searchParams.get('date') || 'April 7'),
+          totalTrades: Number(url.searchParams.get('trades') || 5),
+          winningTrades: Number(url.searchParams.get('wins') || 3),
+          losingTrades: Number(url.searchParams.get('losses') || 2),
+          winRatePct: Number(url.searchParams.get('winRate') || 60),
+          portfolioChangePct: Number(url.searchParams.get('change') || 1.3),
+          activeAssets: String(url.searchParams.get('assets') || 'ADA,SOL,DOT,XRP').split(',').map(s => s.trim()).filter(Boolean)
+        }));
+      }
+      if (type === 'weekly') {
+        return sendJson(res, 200, formatWeeklySummaryPost({
+          weekLabel: String(url.searchParams.get('week') || 'Apr 1 – Apr 7'),
+          totalTrades: Number(url.searchParams.get('trades') || 19),
+          winningTrades: Number(url.searchParams.get('wins') || 11),
+          losingTrades: Number(url.searchParams.get('losses') || 8),
+          winRatePct: Number(url.searchParams.get('winRate') || 57.9),
+          portfolioGrowthPct: Number(url.searchParams.get('growth') || 4.6),
+          activeAssets: String(url.searchParams.get('assets') || 'ADA,SOL,DOT,XRP').split(',').map(s => s.trim()).filter(Boolean)
+        }));
+      }
+      return sendJson(res, 400, { ok: false, error: 'Unknown dry-run type' });
     }
 
     if (url.pathname === '/auth/x/start') {
@@ -85,7 +156,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      saveAuthorizedAccount({
+      await setAuthorizedAccount({
         id: String(data.id || ''),
         username,
         name: String(data.name || ''),
