@@ -5,6 +5,8 @@ import { savePending, takePending } from './lib/store.mjs';
 import { loadConfig, setAuthorizedAccount, setPostingEnabled, setPostingMode } from './lib/config-store.mjs';
 import { listRecent } from './lib/post-history-store.mjs';
 import { formatTradeExecutionPost, formatDailySummaryPost, formatWeeklySummaryPost } from './lib/post-formatters.mjs';
+import { createPost } from './lib/x-post.mjs';
+import { recordPostAttempt } from './lib/post-history-store.mjs';
 
 const PORT = Number(process.env.PORT || 8080);
 
@@ -115,6 +117,16 @@ const server = http.createServer(async (req, res) => {
         }));
       }
       return sendJson(res, 400, { ok: false, error: 'Unknown dry-run type' });
+    }
+
+    if (url.pathname === '/posts/manual' && req.method === 'POST') {
+      const text = String(url.searchParams.get('text') || '').trim();
+      if (!text) return sendJson(res, 400, { ok: false, error: 'Missing text' });
+      const cfg = await loadConfig();
+      if (!cfg.postingEnabled) return sendJson(res, 403, { ok: false, error: 'posting_disabled' });
+      const result = await createPost(text);
+      await recordPostAttempt({ dedupeKey: `manual:${Date.now()}`, type: 'manual', content: text, posted: !!result.ok, postId: result.json?.data?.id || null, meta: { status: result.status || null } });
+      return sendJson(res, result.ok ? 200 : 502, result);
     }
 
     if (url.pathname === '/auth/x/start') {
